@@ -1,66 +1,203 @@
-Description: >
-  This template deploys an Application Load Balancer that exposes our various ECS services.
-  We create them in a seperate nested template, so it can be referenced by all of the other nested templates.
+AWSTemplateFormatVersion: 2010-09-09
+#stackname: kit-nonprod-alb-cf
+Description: M2C CFN kit nonprod application load balancer
 
 Parameters:
-  EnvironmentName:
-    Description: An environment name that will be prefixed to resource names
+  VpcId:
+    Description: Chose the VPC
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /ams/vpc-04db4a1a9bddc7e54/VPCId
+  SSLCertificateARN:
     Type: String
-
-  VPC:
-    Type: AWS::EC2::VPC::Id
-    Description: Choose which VPC the Application Load Balancer should be deployed to
-
-  Subnets:
-    Description: Choose which subnets the Application Load Balancer should be deployed to
-    Type: List<AWS::EC2::Subnet::Id>
-
-  SecurityGroup:
-    Description: Select the Security Group to apply to the Application Load Balancer
-    Type: AWS::EC2::SecurityGroup::Id
+    Description: Provide ARN of the SSL certificate imported in AWS Certificate Manager.
+  albSG:
+    Description: Get the alb security group
+    Type: String
+    Default: sg-0d792ec217d17136a
+  webec2id:
+    Description: Get the web instance id
+    Type: String
+    Default: 
+  adminec2id:
+    Description: Get the admin instance id
+    Type: String
+    Default: i-0a540c19337e0c0d5
+  Subnet1: 
+    Type: String
+    Default: subnet-03a2f6203d294e3be
+  Subnet2:
+    Type: String
+    Default: subnet-0711549077ec83e09
+  Subnet3:
+    Type: String
+    Default: subnet-0958d7f7324f6dd2b
 
 Resources:
-  LoadBalancer:
+  ApplicationLoadBalancer:  
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Name: !Ref EnvironmentName
-      Subnets: !Ref Subnets
-      SecurityGroups:
-        - !Ref SecurityGroup
-      Tags:
-        - Key: Name
-          Value: !Ref EnvironmentName
+    Properties: 
+      IpAddressType: ipv4
+      LoadBalancerAttributes: 
+        - LoadBalancerAttribute
+      Name: kit-test-alb
+      Scheme: internal
+      SecurityGroups: !Ref albSG
+      Subnets: 
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+      Type: application
 
-  LoadBalancerListener:
+  HTTPSListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
-      LoadBalancerArn: !Ref LoadBalancer
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref webTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateARN
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+      
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+       - Type: "redirect"
+         RedirectConfig:
+           Protocol: "HTTPS"
+           Port: 443
+           Host: "#{host}"
+           Path: "/#{path}"
+           Query: "#{query}"
+           StatusCode: "HTTP_301"
+          Type: redirect
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 80
       Protocol: HTTP
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref DefaultTargetGroup
 
-  # We define a default target group here, as this is a mandatory Parameters
-  # when creating an Application Load Balancer Listener. This is not used, instead
-  # a target group is created per-service in each service template (../services/*)
-  DefaultTargetGroup:
+  webTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${EnvironmentName}-default
-      VpcId: !Ref VPC
-      Port: 80
-      Protocol: HTTP
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /public/util/health_check.jsp
+      Port: 443
+      Protocol: HTTPS
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTPS
+      HealthCheckTimeoutSeconds: 10
+      UnhealthyThresholdCount: 5
+      TargetType: instance
+      Targets: !Ref webec2id
+      Matcher: 
+        HttpCode: 200
+      HealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+      Name: kit-web-test-tg
+      TargetGroupAttributes: 
+        - Key: stickiness.enabled
+          Value: true
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 86400
+        - Key: slow_start.duration_seconds
+          Value: 0
+        - Key: load_balancing.algorithm.type
+          Value: round_robin
+  
+  adminTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /public/util/health_check.jsp
+      Port: 443
+      Protocol: HTTPS
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTPS
+      HealthCheckTimeoutSeconds: 10
+      UnhealthyThresholdCount: 5
+      TargetType: instance
+      Targets: !Ref adminec2id
+      Matcher: 
+        HttpCode: 200
+      HealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+      Name: kit-admin-test-tg
+      TargetGroupAttributes: 
+        - Key: stickiness.enabled
+          Value: true
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 86400
+        - Key: slow_start.duration_seconds
+          Value: 0
+        - Key: load_balancing.algorithm.type
+          Value: round_robin
+  
+  webListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Priority: 1
+      ListenerArn: !Ref HTTPSListener
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - intranet-test.core.kmtltd.net.au
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref webTargetGroup
+          Order: 1
+          ForwardConfig: 
+            TargetGroups: 
+              - TargetGroupArn: !Ref webTargetGroup
+                Weight: 1
+            TargetGroupStickinessConfig: 
+                Enabled: false
 
-Outputs:
-  LoadBalancer:
-    Description: A reference to the Application Load Balancer
-    Value: !Ref LoadBalancer
+  adminListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Priority: 1
+      ListenerArn: !Ref HTTPSListener
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - intranetadmin-test.core.kmtltd.net.au
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref adminTargetGroup
+          Order: 1
+          ForwardConfig: 
+            TargetGroups: 
+              - TargetGroupArn: !Ref adminTargetGroup
+                Weight: 1
+            TargetGroupStickinessConfig: 
+                Enabled: false
 
-  LoadBalancerUrl:
-    Description: The URL of the ALB
-    Value: !GetAtt LoadBalancer.DNSName
+Outputs:        
+  ALB:
+    Description: The created loadbalancer
+    Value: !Ref ApplicationLoadBalancer
 
-  Listener:
-    Description: A reference to a port 80 listener
-    Value: !Ref LoadBalancerListener
+  webTargetGroup:
+    Description: The created TargetGroup 1
+    Value: !Ref webTargetGroup
+
+  adminTargetGroup:
+    Description: The created TargetGroup 2
+    Value: !Ref adminTargetGroup
+
+  LoadBalancerSecurityGroup:
+    Description: the securty group for the ALB
+    Value: !Ref ALBSecurityGroup
